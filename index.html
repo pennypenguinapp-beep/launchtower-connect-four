@@ -104,8 +104,51 @@
     height: auto;
     display: block;
     border-radius: 12px;
-    touch-action: manipulation;
+    touch-action: none;
   }
+
+  .overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    background: rgba(13, 15, 21, 0.82);
+    border-radius: 12px;
+    text-align: center;
+    padding: 20px;
+    z-index: 5;
+  }
+  .overlay.hidden { display: none; }
+  .overlay h2 {
+    font-size: 1.9rem;
+    letter-spacing: 0.08em;
+    font-weight: 800;
+  }
+  .overlay h2 span { color: var(--accent); }
+  .overlay .sub { color: var(--muted); font-size: 0.9rem; max-width: 340px; }
+  .overlay .result { font-size: 1.5rem; font-weight: 700; }
+  .overlay .result.red { color: var(--red); }
+  .overlay .result.yellow { color: var(--yellow); }
+  .overlay .result.draw { color: var(--muted); }
+  .overlay .final { color: var(--text); font-size: 1.05rem; }
+  .overlay .final b { color: var(--accent); }
+  .overlay .hint { color: var(--muted); font-size: 0.75rem; }
+  .big-btn {
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: 10px;
+    padding: 14px 44px;
+    font-size: 1.1rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    cursor: pointer;
+    box-shadow: 0 4px 18px rgba(79, 140, 255, 0.35);
+  }
+  .big-btn:active { transform: scale(0.97); }
 
   .status {
     text-align: center;
@@ -167,6 +210,22 @@
 
 <div class="board-wrap">
   <canvas id="board" width="520" height="620" aria-label="Connect Four board"></canvas>
+  <div class="overlay" id="startOverlay">
+    <h2>CONNECT <span>FOUR</span></h2>
+    <div class="sub">Drop discs and line up four in a row. Beat the AI or a friend.</div>
+    <button class="big-btn" id="playBtn">PLAY</button>
+    <div class="hint">Tap a column &middot; Arrow keys + Enter &middot; P to pause</div>
+  </div>
+  <div class="overlay hidden" id="overOverlay">
+    <div class="result" id="overResult">Red wins!</div>
+    <div class="final" id="overFinal">Score 0 &ndash; 0 &middot; Best 0</div>
+    <button class="big-btn" id="againBtn">PLAY AGAIN</button>
+  </div>
+  <div class="overlay hidden" id="pauseOverlay">
+    <h2>PAUSED</h2>
+    <div class="sub">Switched tabs? No problem &mdash; the game waits for you.</div>
+    <button class="big-btn" id="resumeBtn">RESUME</button>
+  </div>
 </div>
 
 <div class="status" id="status">Red to move — tap a column</div>
@@ -197,6 +256,65 @@
 
   var board, current, gameOver, winCells, scores;
   var aiColor = 2; // AI always plays yellow in 1P mode
+  var paused = false;
+  var aiTimer = null;
+  var lastResult = null; // {winner: 1|2|0, red, yellow}
+
+  var startOverlay = document.getElementById("startOverlay");
+  var overOverlay = document.getElementById("overOverlay");
+  var pauseOverlay = document.getElementById("pauseOverlay");
+  var playBtn = document.getElementById("playBtn");
+  var againBtn = document.getElementById("againBtn");
+  var resumeBtn = document.getElementById("resumeBtn");
+  var overResult = document.getElementById("overResult");
+  var overFinal = document.getElementById("overFinal");
+
+  // ---- best score (localStorage) ----
+  function getBest() {
+    try { return parseInt(localStorage.getItem("c4_best") || "0", 10) || 0; } catch (e) { return 0; }
+  }
+  function setBest(v) {
+    try { localStorage.setItem("c4_best", String(v)); } catch (e) {}
+  }
+
+  // ---- WebAudio sound cues (no files) ----
+  var audioCtx = null;
+  function ensureAudio() {
+    if (!audioCtx) {
+      try {
+        var AC = window.AudioContext || window.webkitAudioContext;
+        if (AC) audioCtx = new AC();
+      } catch (e) { audioCtx = null; }
+    }
+    if (audioCtx && audioCtx.state === "suspended") {
+      audioCtx.resume().catch(function () {});
+    }
+  }
+  function tone(freq, dur, type, vol, when) {
+    if (!audioCtx) return;
+    try {
+      var t0 = audioCtx.currentTime + (when || 0);
+      var osc = audioCtx.createOscillator();
+      var gain = audioCtx.createGain();
+      osc.type = type || "sine";
+      osc.frequency.setValueAtTime(freq, t0);
+      gain.gain.setValueAtTime(vol || 0.12, t0);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+      osc.start(t0);
+      osc.stop(t0 + dur + 0.02);
+    } catch (e) {}
+  }
+  function sfxDrop() { ensureAudio(); tone(180, 0.09, "triangle", 0.14); }
+  function sfxWin() {
+    ensureAudio();
+    tone(523.25, 0.12, "sine", 0.14, 0);
+    tone(659.25, 0.12, "sine", 0.14, 0.1);
+    tone(783.99, 0.2, "sine", 0.16, 0.2);
+  }
+  function sfxDraw() { ensureAudio(); tone(220, 0.25, "sine", 0.1); }
+  function sfxClick() { ensureAudio(); tone(440, 0.05, "square", 0.06); }
 
   // ---- layout geometry (CSS pixels, canvas is 520x620) ----
   var cell, padX, padTop, boardW, boardH, holeR;
@@ -219,11 +337,25 @@
     current = 1;
     gameOver = false;
     winCells = null;
+    lastResult = null;
+    paused = false;
+    if (aiTimer) { clearTimeout(aiTimer); aiTimer = null; }
+    overOverlay.classList.add("hidden");
+    pauseOverlay.classList.add("hidden");
     updateStatus();
     draw();
   }
 
-  function newGame() {
+  function startGame() {
+    sfxClick();
+    started = true;
+    startOverlay.classList.add("hidden");
+    reset();
+  }
+
+  function playAgain() {
+    sfxClick();
+    started = true;
     reset();
   }
 
@@ -285,10 +417,11 @@
   }
 
   function onMove(col) {
-    if (gameOver) return;
+    if (gameOver || paused) return;
     if (!validCol(col)) return;
     lastMover = current;
     lastRow = drop(col);
+    sfxDrop();
     var win = checkWin(col);
     if (win) {
       gameOver = true;
@@ -296,23 +429,61 @@
       if (lastMover === 1) scores.red++; else scores.yellow++;
       updateScores();
       var name = lastMover === 1 ? "Red" : "Yellow";
-      setStatus("<b class='" + (lastMover === 1 ? "red" : "yellow") + "'>" + name + " wins!</b> — tap New Game to play again");
+      lastResult = { winner: lastMover, red: scores.red, yellow: scores.yellow };
+      sfxWin();
+      setStatus("<b class='" + (lastMover === 1 ? "red" : "yellow") + "'>" + name + " wins!</b>");
       draw();
+      showGameOver();
       return;
     }
     if (isFull()) {
       gameOver = true;
       scores.draw++;
       updateScores();
-      setStatus("Draw — board is full. Tap New Game to play again");
+      lastResult = { winner: 0, red: scores.red, yellow: scores.yellow };
+      sfxDraw();
+      setStatus("Draw — board is full.");
       draw();
+      showGameOver();
       return;
     }
     current = current === 1 ? 2 : 1;
     updateStatus();
     draw();
     if (modeSel.value === "ai" && current === aiColor) {
-      setTimeout(aiMove, 350);
+      aiTimer = setTimeout(aiMove, 350);
+    }
+  }
+
+  function showGameOver() {
+    var best = getBest();
+    if (lastResult.winner === 1 && scores.red > best) { best = scores.red; setBest(best); }
+    if (lastResult.winner === 2 && scores.yellow > best) { best = scores.yellow; setBest(best); }
+    if (lastResult.winner === 1) {
+      overResult.textContent = "Red wins!";
+      overResult.className = "result red";
+    } else if (lastResult.winner === 2) {
+      overResult.textContent = "Yellow wins!";
+      overResult.className = "result yellow";
+    } else {
+      overResult.textContent = "Draw";
+      overResult.className = "result draw";
+    }
+    overFinal.innerHTML = "Score <b>" + scores.red + " &ndash; " + scores.yellow + "</b> &middot; Best <b>" + best + "</b>";
+    setTimeout(function () { overOverlay.classList.remove("hidden"); }, 450);
+  }
+
+  function setPaused(p) {
+    if (gameOver) return;
+    paused = p;
+    if (p) {
+      if (aiTimer) { clearTimeout(aiTimer); aiTimer = null; }
+      pauseOverlay.classList.remove("hidden");
+    } else {
+      pauseOverlay.classList.add("hidden");
+      if (modeSel.value === "ai" && current === aiColor) {
+        aiTimer = setTimeout(aiMove, 350);
+      }
     }
   }
 
@@ -511,7 +682,7 @@
 
     // turn indicator above the board
     if (!gameOver) {
-      var ix = padX + 3 * cell + cell / 2;
+      var ix = padX + focusCol * cell + cell / 2;
       var iy = padTop - 20;
       ctx.beginPath();
       ctx.arc(ix, iy, 9, 0, Math.PI * 2);
@@ -531,23 +702,81 @@
   }
 
   canvas.addEventListener("click", function (e) {
-    if (gameOver) return;
+    if (gameOver || paused) return;
     if (modeSel.value === "ai" && current === aiColor) return;
     var c = colFromEvent(e);
-    if (c >= 0) onMove(c);
+    if (c >= 0) { focusCol = c; onMove(c); }
   });
 
   canvas.addEventListener("touchstart", function (e) {
-    if (gameOver) return;
+    if (gameOver || paused) return;
     if (modeSel.value === "ai" && current === aiColor) return;
     if (e.touches.length !== 1) return;
     e.preventDefault();
     var t = e.touches[0];
     var c = colFromEvent(t);
-    if (c >= 0) onMove(c);
+    if (c >= 0) { focusCol = c; onMove(c); }
   }, { passive: false });
 
+  // ---- keyboard controls ----
+  var focusCol = 3;
+  var started = false;
+  function keyboardMove() {
+    if (gameOver || paused) return;
+    if (modeSel.value === "ai" && current === aiColor) return;
+    if (!validCol(focusCol)) {
+      // find nearest open column
+      var best = -1, bd = 99;
+      for (var c = 0; c < COLS; c++) {
+        if (validCol(c)) {
+          var d = Math.abs(c - focusCol);
+          if (d < bd) { bd = d; best = c; }
+        }
+      }
+      if (best < 0) return;
+      focusCol = best;
+    }
+    onMove(focusCol);
+  }
+  document.addEventListener("keydown", function (e) {
+    if (!started) {
+      if (e.key === "Enter" || e.key === " " || e.key === "ArrowDown") {
+        startGame();
+        e.preventDefault();
+      }
+      return;
+    }
+    if (e.key === "ArrowLeft") {
+      if (focusCol > 0) focusCol--;
+      e.preventDefault();
+    } else if (e.key === "ArrowRight") {
+      if (focusCol < COLS - 1) focusCol++;
+      e.preventDefault();
+    } else if (e.key === "Enter" || e.key === " " || e.key === "ArrowDown") {
+      if (!overOverlay.classList.contains("hidden")) { playAgain(); e.preventDefault(); return; }
+      if (!pauseOverlay.classList.contains("hidden")) { setPaused(false); e.preventDefault(); return; }
+      keyboardMove();
+      e.preventDefault();
+    } else if (e.key === "p" || e.key === "P") {
+      setPaused(!paused);
+      e.preventDefault();
+    }
+  });
+
+  // ---- pause on tab hidden ----
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden) {
+      if (!started) return;
+      setPaused(true);
+    }
+  });
+
+  playBtn.addEventListener("click", startGame);
+  againBtn.addEventListener("click", playAgain);
+  resumeBtn.addEventListener("click", function () { sfxClick(); setPaused(false); });
+
   newBtn.addEventListener("click", function () {
+    sfxClick();
     scores = { red: scores.red, yellow: scores.yellow, draw: scores.draw };
     reset();
   });
@@ -558,6 +787,18 @@
     updateScores();
     reset();
   });
+
+  // ---- responsive canvas (letterboxed to fit window) ----
+  function fitCanvas() {
+    var availW = Math.min(window.innerWidth - 24, 520);
+    var availH = window.innerHeight - 260; // header/controls/scoreboard/footer
+    var scale = Math.min(availW / canvas.width, availH / canvas.height, 1);
+    if (scale < 0.2) scale = 0.2;
+    canvas.style.width = Math.round(canvas.width * scale) + "px";
+    canvas.style.maxWidth = "none";
+  }
+  window.addEventListener("resize", fitCanvas);
+  fitCanvas();
 
   // ---- init ----
   scores = { red: 0, yellow: 0, draw: 0 };
