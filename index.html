@@ -214,7 +214,7 @@
     <h2>CONNECT <span>FOUR</span></h2>
     <div class="sub">Drop discs and line up four in a row. Beat the AI or a friend.</div>
     <button class="big-btn" id="playBtn">PLAY</button>
-    <div class="hint">Tap a column &middot; Arrow keys + Enter &middot; P to pause</div>
+    <div class="hint">Tap a column &middot; Swipe to move &middot; Arrow keys + Enter &middot; P to pause</div>
   </div>
   <div class="overlay hidden" id="overOverlay">
     <div class="result" id="overResult">Red wins!</div>
@@ -307,6 +307,7 @@
     } catch (e) {}
   }
   function sfxDrop() { ensureAudio(); tone(180, 0.09, "triangle", 0.14); }
+  function sfxScore() { ensureAudio(); tone(660, 0.08, "square", 0.08); tone(880, 0.1, "square", 0.08, 0.08); }
   function sfxWin() {
     ensureAudio();
     tone(523.25, 0.12, "sine", 0.14, 0);
@@ -387,7 +388,6 @@
   }
 
   function checkWin(c) {
-    var p = board[0][c] === 0 ? null : null;
     // find the player who just moved: current is already switched, so use the last mover
     var mover = lastMover;
     var dirs = [[0,1],[1,0],[1,1],[1,-1]];
@@ -428,6 +428,7 @@
       winCells = win;
       if (lastMover === 1) scores.red++; else scores.yellow++;
       updateScores();
+      sfxScore();
       var name = lastMover === 1 ? "Red" : "Yellow";
       lastResult = { winner: lastMover, red: scores.red, yellow: scores.yellow };
       sfxWin();
@@ -708,15 +709,34 @@
     if (c >= 0) { focusCol = c; onMove(c); }
   });
 
+  var touchStartX = 0, touchStartY = 0, touchMoved = false;
   canvas.addEventListener("touchstart", function (e) {
+    if (e.touches.length !== 1) return;
+    touchStartX = e.touches[0].clientX;
+    touchStartY = e.touches[0].clientY;
+    touchMoved = false;
+  }, { passive: true });
+  canvas.addEventListener("touchmove", function (e) {
+    if (e.touches.length !== 1) return;
+    var dx = e.touches[0].clientX - touchStartX;
+    if (Math.abs(dx) > 12) touchMoved = true;
+  }, { passive: true });
+  canvas.addEventListener("touchend", function (e) {
     if (gameOver || paused) return;
     if (modeSel.value === "ai" && current === aiColor) return;
-    if (e.touches.length !== 1) return;
-    e.preventDefault();
-    var t = e.touches[0];
+    if (touchMoved) {
+      // swipe: move the keyboard focus column
+      var dx = (e.changedTouches && e.changedTouches[0] ? e.changedTouches[0].clientX : touchStartX) - touchStartX;
+      if (dx > 24) { if (focusCol < COLS - 1) focusCol++; }
+      else if (dx < -24) { if (focusCol > 0) focusCol--; }
+      draw();
+      return;
+    }
+    var t = e.changedTouches && e.changedTouches[0] ? e.changedTouches[0] : null;
+    if (!t) return;
     var c = colFromEvent(t);
     if (c >= 0) { focusCol = c; onMove(c); }
-  }, { passive: false });
+  }, { passive: true });
 
   // ---- keyboard controls ----
   var focusCol = 3;
@@ -767,7 +787,7 @@
   document.addEventListener("visibilitychange", function () {
     if (document.hidden) {
       if (!started) return;
-      setPaused(true);
+      if (!gameOver && !paused) setPaused(true);
     }
   });
 
@@ -796,6 +816,7 @@
     if (scale < 0.2) scale = 0.2;
     canvas.style.width = Math.round(canvas.width * scale) + "px";
     canvas.style.maxWidth = "none";
+    canvas.style.height = Math.round(canvas.height * scale) + "px";
   }
   window.addEventListener("resize", fitCanvas);
   fitCanvas();
